@@ -1,6 +1,6 @@
 # edge-extensions
 
-Automated CRX hosting for Microsoft Edge MDM deployment via `ExtensionInstallForcelist`.
+Automated CRX (Manifest V2) hosting for Microsoft Edge MDM deployment via `ExtensionInstallForcelist`.
 
 ## Extensions
 
