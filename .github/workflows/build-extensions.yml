@@ -1,0 +1,102 @@
+name: Build and publish CRX extensions
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC to check for new releases
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-ublock:
+    name: Build uBlock Origin CRX
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get latest uBlock Origin release version
+        id: ublock_version
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/gorhill/uBlock/releases/latest | jq -r '.tag_name')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Latest uBlock version: $VERSION"
+
+      - name: Check if already built
+        id: check_built
+        run: |
+          CURRENT=""
+          if [ -f docs/ublock-origin/version.txt ]; then
+            CURRENT=$(cat docs/ublock-origin/version.txt)
+          fi
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          if [ "$CURRENT" = "${{ steps.ublock_version.outputs.version }}" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Already up to date: $CURRENT"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Update needed: $CURRENT -> ${{ steps.ublock_version.outputs.version }}"
+          fi
+
+      - name: Download uBlock Origin Chromium build
+        if: steps.check_built.outputs.skip == 'false'
+        run: |
+          VERSION="${{ steps.ublock_version.outputs.version }}"
+          curl -L -o ublock.zip "https://github.com/gorhill/uBlock/releases/download/${VERSION}/uBlock0_${VERSION}.chromium.zip"
+          unzip ublock.zip -d ublock-src
+
+      - name: Install crx3 builder
+        if: steps.check_built.outputs.skip == 'false'
+        run: npm install -g crx3
+
+      - name: Write private key
+        if: steps.check_built.outputs.skip == 'false'
+        run: echo "${{ secrets.CRX_PRIVATE_KEY }}" > ublock-key.pem
+
+      - name: Build CRX
+        if: steps.check_built.outputs.skip == 'false'
+        run: |
+          mkdir -p docs/ublock-origin
+          crx3 pack ublock-src/uBlock0.chromium -p ublock-key.pem -o docs/ublock-origin/ublock-origin.crx
+
+      - name: Get extension ID from key
+        if: steps.check_built.outputs.skip == 'false'
+        id: ext_id
+        run: |
+          # Derive extension ID from public key
+          PUBKEY=$(openssl rsa -in ublock-key.pem -pubout -outform DER 2>/dev/null | base64 -w 0)
+          # Extension ID = first 32 chars of sha256 of DER public key, mapped to a-p alphabet
+          ID=$(openssl rsa -in ublock-key.pem -pubout -outform DER 2>/dev/null | sha256sum | head -c 32 | tr '0-9a-f' 'a-p')
+          echo "id=$ID" >> $GITHUB_OUTPUT
+          echo "Extension ID: $ID"
+
+      - name: Write update manifest and version file
+        if: steps.check_built.outputs.skip == 'false'
+        run: |
+          VERSION="${{ steps.ublock_version.outputs.version }}"
+          EXT_ID="${{ steps.ext_id.outputs.id }}"
+          cat > docs/ublock-origin/update-manifest.xml << EOF
+          <?xml version='1.0' encoding='UTF-8'?>
+          <gupdate xmlns='http://www.google.com/update2/response' protocol='2.0'>
+            <app appid='${EXT_ID}'>
+              <updatecheck codebase='https://lc-it-0.github.io/edge-extensions/ublock-origin/ublock-origin.crx' version='${VERSION}' />
+            </app>
+          </gupdate>
+          EOF
+          echo "$VERSION" > docs/ublock-origin/version.txt
+
+      - name: Cleanup key
+        if: steps.check_built.outputs.skip == 'false'
+        run: rm -f ublock-key.pem
+
+      - name: Commit and push
+        if: steps.check_built.outputs.skip == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/
+          git commit -m "Update uBlock Origin to ${{ steps.ublock_version.outputs.version }}"
+          git push
